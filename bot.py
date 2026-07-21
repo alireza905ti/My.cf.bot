@@ -1,65 +1,62 @@
-import logging
-import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# توکن به صورت امن از سرویس رندر دریافت خواهد شد
 import os
-TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
+import requests
+import uuid
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سلام! برای ثبت رکورد DNS کلادفلر، اطلاعات را به شکل زیر بفرستید:\n\n"
-        "`API_KEY|ZONE_ID|DOMAIN_NAME|IP`\n\n"
-        "مثال:\n"
-        "`c2548...|a1b2c3...|sub.example.com|1.2.3.4`",
-        parse_mode='Markdown'
+        "سلام! 👋\n"
+        "برای ساخت کانفیگ سریع، فقط کافیه **API Key کلادفلر** خودت رو اینجا بفرستی:"
     )
 
-async def handle_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    try:
-        api_token, zone_id, domain, ip = [x.strip() for x in text.split('|')]
-        await update.message.reply_text("⏳ در حال تنظیم رکورد DNS در کلادفلر...")
-        
-        url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-        headers = {
-            "Authorization": f"Bearer {api_token}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "type": "A",
-            "name": domain,
-            "content": ip,
-            "ttl": 1,
-            "proxied": True
-        }
-        
-        response = requests.post(url, json=payload, headers=headers)
-        res_data = response.json()
-        
-        if res_data.get("success"):
-            await update.message.reply_text(
-                f"✅ **با موفقیت انجام شد!**\n\n"
-                f"🔹 دامنه: `{domain}`\n"
-                f"🔹 آی‌پی: `{ip}`\n"
-                f"🔹 ابر کلادفلر: روشن (Proxied)\n\n"
-                f"حالا می‌توانید کانفیگ مربوط به این دامنه را استفاده کنید.",
-                parse_mode='Markdown'
-            )
-        else:
-            errors = res_data.get("errors", [{}])[0].get("message", "خطای نامشخص")
-            await update.message.reply_text(f"❌ **خطا در کلادفلر:**\n{errors}")
+async def handle_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    api_token = update.message.text.strip()
+    
+    # پیام اولیه
+    status_msg = await update.message.reply_text("⚡ در حال بررسی کلادفلر و دریافت اطلاعات...")
 
-    except ValueError:
-        await update.message.reply_text("⚠️ فرمت ورودی اشتباه است.\nالگو: `API_KEY|ZONE_ID|DOMAIN_NAME|IP`", parse_mode='Markdown')
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        # ۱. دریافت اطلاعات دامنه از کلادفلر
+        res = requests.get("https://api.cloudflare.com/client/v4/zones", headers=headers, timeout=10)
+        data = res.json()
+
+        if res.status_code == 200 and data.get("success") and len(data["result"]) > 0:
+            # برداشتن اولین دامنه فعال ثبت‌شده
+            domain = data["result"][0]["name"]
+            user_uuid = str(uuid.uuid4()) # ساخت شناسه اختصاصی کانفیگ
+
+            # ۲. ساخت لینک کانفیگ vless با پروتکل gRPC برای حداکثر سرعت
+            vless_config = (
+                f"vless://{user_uuid}@{domain}:443?"
+                f"encryption=none&security=tls&type=grpc&serviceName=grpc&sni={domain}#CF-Fast-gRPC"
+            )
+
+            response_text = (
+                f"✅ **اتصال با موفقیت انجام شد!**\n\n"
+                f"🌐 **دامنه شناسایی‌شده:** `{domain}`\n"
+                f"⚡ **پروتکل:** VLESS + gRPC (TLS)\n\n"
+                f"👇 **لینک کانفیگ اختصاصی شما:**\n"
+                f"`{vless_config}`\n\n"
+                f"💡 *نکته:* هر زمان آی‌پی تمیز کلادفلر پیدا کردی، می‌تونی توی نرم‌افزارت (مثل v2rayN یا Hiddify) بخش Address/IP رو روی اون آی‌پی جدید بگذاری تا سرعت چند برابر بشه."
+            )
+            await status_msg.edit_text(response_text, parse_mode="Markdown")
+
+        else:
+            await status_msg.edit_text("❌ کلید کلادفلر معتبر نیست یا هیچ دامنه‌ای روی این اکانت وجود نداره. لطفاً مجدداً بررسی کن.")
+
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {str(e)}")
+        await status_msg.edit_text(f"❌ خطایی در ارتباط رخ داد: {str(e)}")
 
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_setup))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_api_key))
     app.run_polling()
